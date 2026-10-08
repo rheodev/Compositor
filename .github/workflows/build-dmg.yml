@@ -1,6 +1,9 @@
 name: Build DMG
 
 on:
+  push:
+    branches:
+      - compat/macos-15
   workflow_dispatch:
 
 permissions:
