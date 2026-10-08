@@ -19,6 +19,10 @@ struct IndicatorlessScrollView<Content: View>: NSViewRepresentable {
     final class Container: NSScrollView {
         let host: NSHostingView<Content>
 
+        // Swift 6.2 crashes optimizing this generic view's inferred isolated deinit when targeting macOS 15.
+        // No actor-isolated cleanup is needed; keep destruction nonisolated without disabling optimization.
+        nonisolated deinit {}
+
         init(rootView: Content) {
             host = NSHostingView(rootView: rootView)
             super.init(frame: .zero)

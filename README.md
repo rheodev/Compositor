@@ -81,8 +81,10 @@ brew install --cask robbietilton-compositor
 
 ## Requirements
 
-- macOS 26.0 or later on a Mac with Apple silicon
+- macOS 15.0 or later on a Mac with Apple silicon
 - Xcode 26 or later (to build from source)
+
+Build from source for macOS 15 support; the currently published 1.4.6 download requires macOS 26. On macOS 15, native pop-up buttons use the system's default shape and the toolbar uses its standard spacing and background. On macOS 26 and later, the capsule pop-up buttons and newer toolbar styling are retained.
 
 ## Building
 
