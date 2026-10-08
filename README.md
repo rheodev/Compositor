@@ -90,6 +90,16 @@ Build from source for macOS 15 support; the currently published 1.4.6 download r
 
 Open `Compositor.xcodeproj` and run the **Compositor** scheme.
 
+### GitHub Actions DMG
+
+The independent **Build DMG** workflow (`.github/workflows/build-dmg.yml`) creates an Apple silicon Release DMG without Developer ID credentials or repository secrets. It runs only on manual dispatch; it does not publish a GitHub Release or change the automatic update feed.
+
+1. Merge the workflow into the repository's default branch so GitHub enables manual dispatch.
+2. Open **Actions → Build DMG → Run workflow** and select the branch to build. For macOS 15 support, select a branch containing the compatibility changes.
+3. Once the run succeeds, download **Compositor-DMG-arm64** from the run's **Artifacts** section. Unzip it, open the DMG, and drag Compositor into Applications. Artifacts are retained for 14 days.
+
+This build uses ad-hoc signing, not Developer ID signing or notarization. macOS may block the downloaded app; if you trust the build, use **System Settings → Privacy & Security → Open Anyway** after attempting to open it. Use the signed release process below for normal public distribution.
+
 ## Releasing
 
 `scripts/release.sh` builds a Release version, signs it with Developer ID, notarizes and staples it, and packages it into `dist/Compositor-<version>.dmg`.
