@@ -14,12 +14,14 @@ jobs:
     name: Apple silicon DMG
     runs-on: macos-26
     timeout-minutes: 60
-    env:
-      DERIVED_DATA_PATH: ${{ runner.temp }}/CompositorDMG/DerivedData
-      ARTIFACT_DIR: ${{ runner.temp }}/CompositorDMG/artifacts
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Prepare build paths
+        run: |
+          echo "DERIVED_DATA_PATH=$RUNNER_TEMP/CompositorDMG/DerivedData" >> "$GITHUB_ENV"
+          echo "ARTIFACT_DIR=$RUNNER_TEMP/CompositorDMG/artifacts" >> "$GITHUB_ENV"
 
       - name: Select Xcode 26.6
         run: sudo xcode-select -s /Applications/Xcode_26.6.app
