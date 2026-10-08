@@ -101,6 +101,8 @@ Manual dispatch is also available after the workflow is merged into the default 
 
 This build uses ad-hoc signing, not Developer ID signing or notarization. macOS may block the downloaded app; if you trust the build, use **System Settings → Privacy & Security → Open Anyway** after attempting to open it. Use the signed release process below for normal public distribution.
 
+Only this ad-hoc workflow disables Hardened Runtime: its Team-ID-based library validation rejects the embedded Sparkle framework in an ad-hoc app. App Sandbox remains enabled, and the Developer ID release settings are unchanged. Before upload, the workflow mounts the DMG and checks that the packaged app stays running for 10 seconds; this catches startup failures but does not replace macOS 15 compatibility or UI testing.
+
 ## Releasing
 
 `scripts/release.sh` builds a Release version, signs it with Developer ID, notarizes and staples it, and packages it into `dist/Compositor-<version>.dmg`.

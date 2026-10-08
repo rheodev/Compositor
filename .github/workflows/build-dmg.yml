@@ -47,6 +47,7 @@ jobs:
           CODE_SIGN_STYLE=Manual
           CODE_SIGN_IDENTITY=-
           DEVELOPMENT_TEAM=
+          ENABLE_HARDENED_RUNTIME=NO
 
       - name: Package DMG
         shell: bash
@@ -62,6 +63,38 @@ jobs:
           dmg="$ARTIFACT_DIR/Compositor-$version-arm64.dmg"
           hdiutil create -volname Compositor -srcfolder "$stage" -format UDZO "$dmg"
           hdiutil verify "$dmg"
+
+      # Ad-hoc builds have no Team ID, so Hardened Runtime library validation cannot load Sparkle.
+      # Exercise the packaged app, not just its signature, before uploading it.
+      - name: Check packaged app startup
+        shell: bash
+        run: |
+          set -euo pipefail
+          mount="$RUNNER_TEMP/CompositorDMG/mount"
+          mkdir -p "$mount"
+          hdiutil attach -readonly -nobrowse -mountpoint "$mount" "$ARTIFACT_DIR"/*.dmg
+          trap 'hdiutil detach "$mount"' EXIT
+          APP_EXECUTABLE="$mount/Compositor.app/Contents/MacOS/Compositor" python3 <<'PY'
+          import os
+          import subprocess
+
+          process = subprocess.Popen([os.environ["APP_EXECUTABLE"]])
+          try:
+              try:
+                  status = process.wait(timeout=10)
+              except subprocess.TimeoutExpired:
+                  print("PASS: packaged app remained running for 10 seconds")
+              else:
+                  raise SystemExit(f"Packaged app exited during startup: {status}")
+          finally:
+              if process.poll() is None:
+                  process.terminate()
+                  try:
+                      process.wait(timeout=5)
+                  except subprocess.TimeoutExpired:
+                      process.kill()
+                      process.wait()
+          PY
 
       - name: Upload DMG
         uses: actions/upload-artifact@v7
