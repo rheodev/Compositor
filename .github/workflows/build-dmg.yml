@@ -44,6 +44,7 @@ jobs:
           -derivedDataPath "$DERIVED_DATA_PATH"
           -onlyUsePackageVersionsFromResolvedFile
           ARCHS=arm64
+          MACOSX_DEPLOYMENT_TARGET=15.0
           CODE_SIGN_STYLE=Manual
           CODE_SIGN_IDENTITY=-
           DEVELOPMENT_TEAM=
@@ -55,6 +56,8 @@ jobs:
           set -euo pipefail
           app="$DERIVED_DATA_PATH/Build/Products/Release/Compositor.app"
           codesign --verify --deep --strict --verbose=2 "$app"
+          minimum=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist")
+          test "$minimum" = "15.0"
           version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")
           stage="$RUNNER_TEMP/CompositorDMG/stage"
           mkdir -p "$stage" "$ARTIFACT_DIR"
