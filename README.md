@@ -54,7 +54,7 @@ brew install --cask robbietilton-compositor
 - Eyedropper and a full color picker
 
 ### Adjustments and filters
-- Camera Raw filter: light, color, curves, color mixer, color grading, detail, optics and geometry, in a panel beside the canvas
+- Camera Raw filter: light, color, curves, color mixer, color grading, detail, optics and geometry, in a panel beside the canvas; each section resets to its defaults from its header
 - Levels (with Auto), Curves, Hue/Saturation, Exposure, Gradient Map, Grain, Black & White, Color Balance and Invert
 - Gaussian Blur and Motion Blur that spread past a layer's edges
 - Add Noise, Vignette, Bloom / Glow, Dither, Scanlines, Tonal Contrast, Lens Correction and Remove Background
@@ -86,7 +86,9 @@ brew install --cask robbietilton-compositor
 - macOS 15.0 or later on a Mac with Apple silicon
 - Xcode 26 or later (to build from source)
 
-Build from source or use the compatibility branch's DMG for macOS 15 support; the published 1.4.9 release requires macOS 26. On macOS 15, native pop-up buttons use the system's default shape and the toolbar uses its standard spacing and background. On macOS 26 and later, the capsule pop-up buttons and newer toolbar styling are retained.
+Build from source or use the compatibility branch's DMG for macOS 15 support; the upstream releases require macOS 26. On macOS 15, native pop-up buttons use the system's default shape and the toolbar uses its standard spacing and background. On macOS 26 and later, the capsule pop-up buttons and newer toolbar styling are retained.
+
+RAW Highlight Recovery requires macOS 26 and is disabled on macOS 15.
 
 ## Translations
 
