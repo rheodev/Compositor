@@ -607,10 +607,8 @@ nonisolated enum GPUAdjustment {
             return image.applyingGaussianBlur(sigma: adjustment.gaussianRadius * scale)
         case .motionBlur:
             // Core Image's angle turns counterclockwise with y up; the frame's y points down.
-            return image.applyingFilter("CIMotionBlur", parameters: [
-                kCIInputRadiusKey: adjustment.resolvedMotionDistance * scale * PixelFilter.motionRadiusPerPixel,
-                kCIInputAngleKey: -adjustment.resolvedMotionAngle * .pi / 180,
-            ])
+            return PixelFilter.motionBlur(image, distance: adjustment.resolvedMotionDistance * scale,
+                                          angle: -adjustment.resolvedMotionAngle)
         case .addNoise:
             return GPUNoise.addNoise(to: image, mapping: mapping, amount: Float(min(400, max(0.1, adjustment.resolvedNoiseAmount))),
                                      gaussian: adjustment.resolvedNoiseGaussian,

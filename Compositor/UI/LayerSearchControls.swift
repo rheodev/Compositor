@@ -145,13 +145,12 @@ struct LayersHeader: View {
     }
 
     /// The funnel's contents: All Layers reads as on while no toggle is on, and turning it on clears them.
-    private var typeFilterPopover: some View {
-        VStack(alignment: .leading) {
+    @ViewBuilder private var typeFilterPopover: some View {
+        let contents = VStack(alignment: .leading) {
             Toggle("All Layers", systemImage: "square.3.layers.3d", isOn: Binding(
                 get: { session.layerTypeFilter.isEmpty },
                 set: { on in if on { session.clearLayerTypeFilter() } }
             ))
-            .labelReservedIconWidth(16)
             .accessibilityIdentifier("layerFilterAll")
             Divider()
             ForEach(LayerType.allCases.filter { $0 != .selected }, id: \.self) { typeToggle($0) }
@@ -159,6 +158,11 @@ struct LayersHeader: View {
             typeToggle(.selected)
         }
         .padding()
+        if #available(macOS 26.0, *) {
+            contents.labelReservedIconWidth(16)
+        } else {
+            contents
+        }
     }
 
     private func typeToggle(_ kind: LayerType) -> some View {
@@ -166,7 +170,6 @@ struct LayersHeader: View {
             get: { session.layerTypeFilter.contains(kind) },
             set: { on in if on { session.layerTypeFilter.insert(kind) } else { session.layerTypeFilter.remove(kind) } }
         ))
-        .labelReservedIconWidth(16)
         .accessibilityLabel(kind.filterLabel)
         .accessibilityIdentifier(kind.accessibilityID)
     }

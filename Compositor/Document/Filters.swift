@@ -283,6 +283,22 @@ nonisolated enum PixelFilter {
     /// distance; Core Image tapers like a Gaussian whose spread is about its radius (measured on a
     /// single dot). An even streak of length d spreads d / √12, so this radius matches its spread.
     static let motionRadiusPerPixel = 1 / 12.0.squareRoot()
+
+    private static let normalizeMotionBlur = CIColorKernel(source: """
+        kernel vec4 normalizeMotionBlur(__sample pixel, __sample reference) {
+            return pixel / max(reference.a, 0.0001);
+        }
+        """)
+
+    static func motionBlur(_ image: CIImage, distance: Double, angle: Double) -> CIImage {
+        let parameters = [kCIInputRadiusKey: distance * motionRadiusPerPixel, kCIInputAngleKey: angle * .pi / 180]
+        let blurred = image.applyingFilter("CIMotionBlur", parameters: parameters)
+        if #available(macOS 26.0, *) { return blurred }
+        // Older Core Image can return less than unit alpha even for solid input. Normalize the sample weights.
+        let reference = CIImage(color: .white).applyingFilter("CIMotionBlur", parameters: parameters)
+        return normalizeMotionBlur?.apply(extent: blurred.extent, arguments: [blurred, reference]) ?? blurred
+    }
+
     /// Remove Distortion at ±100 moves the image's corners by this share of their distance from the center.
     static let lensStrength = 0.35
 
@@ -322,8 +338,8 @@ nonisolated enum PixelFilter {
             // Rows run top-down here, so up on screen is a smaller row.
             direction: SIMD2(Float(cos(angle)), Float(-sin(angle))),
             distance: Float(distance), blur: Float(blur), reach: Float(reach), radial: settings.rgbSplitRadial ? 1 : 0,
-            sides: (sides.contains(.left) ? 1 : 0) | (sides.contains(.right) ? 2 : 0) | (sides.contains(.top) ? 4 : 0)
-                | (sides.contains(.bottom) ? 8 : 0),
+            sides: UInt32((sides.contains(.left) ? 1 : 0) | (sides.contains(.right) ? 2 : 0) | (sides.contains(.top) ? 4 : 0)
+                | (sides.contains(.bottom) ? 8 : 0)),
             spectral: distance > 0 ? UInt32(min(32, max(3, Int(spread)))) : 1,
             smear: blur > 0 ? UInt32(min(24, max(2, Int(smear / 2)))) : 1))
         guard let image = context.makeImage() else { throw ExportError.render }
@@ -393,10 +409,8 @@ nonisolated enum PixelFilter {
                                                         light: CGPoint(x: pixel.x, y: Double(height) - pixel.y)), job: job)
         case .motionBlur:
             // Core Image's y axis points up, so its counterclockwise angle matches Photoshop's.
-            let streaked = extending(edges, past: job.canvasSides, of: extent).applyingFilter("CIMotionBlur", parameters: [
-                kCIInputRadiusKey: settings.distance * job.scale * motionRadiusPerPixel,
-                kCIInputAngleKey: settings.angle * .pi / 180,
-            ])
+            let streaked = motionBlur(extending(edges, past: job.canvasSides, of: extent),
+                                      distance: settings.distance * job.scale, angle: settings.angle)
             image = try render(streaked.cropped(to: extent), job: job)
         case .addNoise:
             // C, not Core Image: its random generator is uniform only, and Gaussian noise is needed too.
