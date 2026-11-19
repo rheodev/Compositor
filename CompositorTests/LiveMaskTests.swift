@@ -35,6 +35,28 @@ import Testing
         for i in 0..<4 { #expect(bytes[i*4] == 255) }
     }
 
+    /// A layer added in the middle of a clipping group joins it, as one dropped there does; added above the group's
+    /// top, it stays unclipped.
+    @Test func newLayerInsideAClippingGroupJoinsIt() throws {
+        let s = EditorSession(); s.createDocument(width: 2, height: 2)
+        s.insert(try asset([255,255,255,255])); let base = try #require(s.activeLayerID)
+        s.insert(try asset([255,255,255,255])); let lower = try #require(s.activeLayerID)
+        s.toggleClippingMask(lower)
+        s.insert(try asset([255,255,255,255])); let upper = try #require(s.activeLayerID)
+        s.toggleClippingMask(upper)
+        #expect(s.document?.layers.first { $0.id == upper }?.maskSourceID == base)
+
+        s.selectLayer(lower)
+        s.addBlankLayer()
+        #expect(s.activeLayer?.maskSourceID == base)
+        s.selectLayer(base)
+        s.addBlankLayer()
+        #expect(s.activeLayer?.maskSourceID == base)
+        s.selectLayer(upper)
+        s.addBlankLayer()
+        #expect(s.activeLayer?.maskSourceID == nil)
+    }
+
     func asset(_ alpha: [UInt8], color: UInt8 = 255) throws -> ImportedImage {
         let bytes = alpha.flatMap { a in [UInt8(Int(color)*Int(a)/255), UInt8(0), UInt8(0), a] }
         let image = try #require(CGImage(width: 2, height: 2, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: 8,
@@ -55,6 +77,30 @@ import Testing
         s.document?.layers[1].isVisible = false
         #expect(s.linkMask(source: s.document!.layers[1].id, target: s.document!.layers[0].id))
         return s
+    }
+    @Test func menuClipsAndReleasesEverySelectedLayer() throws {
+        let s = EditorSession(); s.createDocument(width: 2, height: 2)
+        for _ in 0..<4 { s.insert(try asset([255,255,255,255])) }
+        let ids = s.document!.layers.map(\.id)
+        // With the bottom layer among them, there's nothing under it to clip to.
+        s.selectLayers(Set(ids), primary: ids[3])
+        #expect(!s.canToggleSelectedClipping && s.selectedClippingTitle == "Create Clipping Mask")
+        s.selectLayers([ids[1], ids[2], ids[3]], primary: ids[3])
+        #expect(s.canToggleSelectedClipping)
+        s.toggleSelectedClipping()
+        #expect(s.document?.layers.map(\.maskSourceID) == [nil, ids[0], ids[0], ids[0]], "all clip to the layer under the lowest")
+        #expect(s.selectedClippingTitle == "Release Clipping Mask")
+        s.undo()
+        #expect(s.document?.layers.allSatisfy { $0.maskSourceID == nil } == true, "one undo step")
+        s.redo()
+        s.selectLayers([ids[2], ids[3]], primary: ids[3])
+        s.toggleSelectedClipping()
+        #expect(s.document?.layers.map(\.maskSourceID) == [nil, ids[0], nil, nil])
+        // Some clipped and some not: it clips the rest.
+        s.selectLayers([ids[1], ids[3]], primary: ids[3])
+        #expect(s.selectedClippingTitle == "Create Clipping Mask")
+        s.toggleSelectedClipping()
+        #expect(s.document?.layers.map(\.maskSourceID) == [nil, ids[0], nil, ids[2]])
     }
     @Test func optionClickCreatesSharedStackAndDragOutReleases() throws {
         let s = EditorSession(); s.createDocument(width: 2, height: 2)

@@ -88,7 +88,7 @@ struct ShortcutDefinition: Identifiable {
             entry("Undo", "z", 1, menu: true), entry("Redo", "z", 9, menu: true),
             entry("New Canvas", "n", 1, menu: true), entry("Open Project", "o", 1, menu: true),
             entry("Save", "s", 1, menu: true), entry("Save As", "s", 9, menu: true),
-            entry("Export JPEG", "s", 11, menu: true), entry("Export PNG", "e", 9, menu: true), entry("Export As", "w", 11, menu: true),
+            entry("Export PNG", "e", 9, menu: true), entry("Export As", "s", 11, menu: true),
             entry("Close Project", "w", 1, menu: true), entry("Fit Canvas", "0", 1, menu: true), entry("Search Commands", "f", 1, menu: true),
             entry("Actual Pixels", "1", 1, menu: true), entry("Zoom In", "=", 1, menu: true),
             entry("Zoom Out", "-", 1, menu: true), entry("Show Transform Controls", "h", 1, menu: true),
@@ -216,6 +216,7 @@ final class ShortcutSettings {
     /// Translate only at the existing canvas/layer responder boundary. Native text
     /// fields and dialog controls retain their normal typing and navigation behavior.
     func canvasEvent(_ event: NSEvent) -> NSEvent? {
+        let event = LatinKeys.event(event)
         let input = ShortcutChord(event)
         // A key that types nothing (a dead key on some layouts) reads as no key, as an unassigned command's does.
         guard !overrides.isEmpty, !input.isNone else { return event }

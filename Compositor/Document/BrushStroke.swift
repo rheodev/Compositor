@@ -24,6 +24,25 @@ nonisolated struct BrushSettings: Sendable {
     var erasing = false
     var healing = false
     var healingMode: SpotHealingMode = .contentAware
+    /// A pen's pressure sets the size of each part of the stroke, and how strongly it lays down, as Photoshop's two
+    /// pressure buttons do. A mouse or trackpad always presses fully.
+    var pressureSize = false
+    var pressureOpacity = false
+    /// Off for hard, pixel-sharp edges, like a pencil: each pixel is painted fully or not at all.
+    var antialiased = true
+
+    /// What a press of `pressure` (0–1) does to the tip: its size as a share of the full diameter, and its strength.
+    func dynamics(_ pressure: CGFloat) -> (scale: CGFloat, strength: CGFloat) {
+        let pressure = pressure.isFinite ? min(1, max(0, pressure)) : 1
+        // Never smaller than a pixel across, so the lightest touch still leaves a line.
+        return (pressureSize ? max(pressure, min(1, 1 / diameter)) : 1, pressureOpacity ? pressure : 1)
+    }
+}
+
+/// One piece of a continuous stroke for the GPU: the line, and the tip's radius and strength at each end.
+struct BrushSegment {
+    var line: SIMD4<Float>
+    var dynamics: SIMD4<Float>
 }
 
 nonisolated struct BrushPatch: @unchecked Sendable {
@@ -146,6 +165,16 @@ final class BrushStroke {
     /// size, run a little wider.
     static let maxDiameter: CGFloat = 2100
     var pixelLimit = DocumentLimits.documentPixelBudget
+    /// For a layer scaled down: how many pixels it may grow to, at its own resolution, as paint goes past its edges.
+    /// Past this the stroke throws `OutgrewItsResolution`, and the session paints it again on the layer at its displayed
+    /// size. Nil to grow freely.
+    var growthLimit: Int?
+    /// A scaled-down layer grown past `growthLimit`: at its own resolution it would take far more pixels than it shows.
+    struct OutgrewItsResolution: Error {}
+    /// The layer as it was in the document when the stroke began, which `layer` stands in for once the stroke has been
+    /// started again on it at its displayed size.
+    var originalLayer: ImageLayer
+    var usesGPU: Bool { gpu != nil }
     /// Limits every edit to the document selection; nil when nothing is selected.
     var selectionClip: SelectionClip?
     /// Clone Stamp, Blur, Smudge and Liquify: an image painted through the tip, and where it sits, already shifted
@@ -176,6 +205,9 @@ final class BrushStroke {
     private var allocatedBounds: CGRect?
     private var previous: CGPoint?
     private var samples: [CGPoint] = []
+    /// The pen pressure at each of `samples`, 1 for a mouse.
+    private var pressures: [CGFloat] = []
+    private var previousPressure: CGFloat = 1
     /// Coverage under the provisional tail; nil where the tile had no coverage yet.
     private var tailBackup: [Int: CGImage?] = [:]
     private var distanceToNext: CGFloat = 0
@@ -201,6 +233,7 @@ final class BrushStroke {
     init(layer: ImageLayer, mask: Bool, settings: BrushSettings, canvas: CGSize, useGPU: Bool = true, growsMask: Bool = false) throws {
         gpu = useGPU ? MetalBrushCoverage.shared : nil
         self.layer = layer
+        originalLayer = layer
         isMask = mask
         self.settings = settings
         self.canvas = CGRect(origin: .zero, size: canvas)
@@ -246,12 +279,12 @@ final class BrushStroke {
         let square = abs(pixelToDocument.b) < 1e-9 && abs(pixelToDocument.c) < 1e-9
             && scaleX > 1e-9 && abs(scaleX - scaleY) < 1e-9
         let gridDiameter = settings.diameter / scaleX
-        gridTip = gpu == nil && square && gridDiameter >= 1 && gridDiameter <= Self.gridTipLimit
+        gridTip = gpu == nil && settings.antialiased && square && gridDiameter >= 1 && gridDiameter <= Self.gridTipLimit
             ? try Self.tip(diameter: gridDiameter, hardness: settings.hardness, falloff: falloff) : nil
         // Drawn through the tile transform, the stamp is rendered as finely as the layer's pixels: magnified onto
         // the finer grid of a scaled-down layer, it left blocky dabs that showed once the layer was scaled back up.
         let stampDiameter = settings.diameter / min(1, scaleX, scaleY)
-        stamp = gpu == nil && gridTip == nil && stampDiameter <= Self.stampLimit
+        stamp = gpu == nil && settings.antialiased && gridTip == nil && stampDiameter <= Self.stampLimit
             ? try Self.tip(diameter: stampDiameter, hardness: settings.hardness, falloff: falloff) : nil
     }
 
@@ -279,21 +312,24 @@ final class BrushStroke {
     /// than straight chords. A curve piece needs the sample after it, so the newest piece
     /// is first drawn as a provisional straight tail (the stroke never trails the cursor),
     /// then erased and replaced by the curve when the next sample arrives or on `flush()`.
-    func append(_ point: CGPoint) throws {
+    func append(_ point: CGPoint, pressure: CGFloat = 1) throws {
         guard point.x.isFinite, point.y.isFinite, abs(point.x) <= 10_000_000, abs(point.y) <= 10_000_000 else { return }
         guard samples.last != point else { return }
-        if gpu != nil { try appendContinuous(point); return }
+        let pressure = pressure.isFinite ? min(1, max(0, pressure)) : 1
+        if gpu != nil { try appendContinuous(point, pressure: pressure); return }
         var changed = removeTail()
         samples.append(point)
-        if samples.count > 4 { samples.removeFirst() }
+        pressures.append(pressure)
+        if samples.count > 4 { samples.removeFirst(); pressures.removeFirst() }
         let count = samples.count
         if count == 1 {
-            try walk(to: point, changed: &changed)
+            try walk(to: point, pressure: pressure, changed: &changed)
         } else if count >= 3 {
             try curve(from: samples[count - 3], to: samples[count - 2],
-                      before: samples[max(0, count - 4)], after: samples[count - 1], changed: &changed)
+                      before: samples[max(0, count - 4)], after: samples[count - 1],
+                      pressures: (pressures[count - 3], pressures[count - 2]), changed: &changed)
         }
-        if count >= 2 { try drawTail(from: samples[count - 2], to: point, changed: &changed) }
+        if count >= 2 { try drawTail(from: samples[count - 2], to: point, pressure: pressure, changed: &changed) }
         try publish(changed)
     }
 
@@ -304,42 +340,90 @@ final class BrushStroke {
         let count = samples.count
         if count >= 2 {
             try curve(from: samples[count - 2], to: samples[count - 1],
-                      before: samples[max(0, count - 3)], after: samples[count - 1], changed: &changed)
+                      before: samples[max(0, count - 3)], after: samples[count - 1],
+                      pressures: (pressures[count - 2], pressures[count - 1]), changed: &changed)
             samples = [samples[count - 1]]
+            pressures = [pressures[count - 1]]
         }
         try publish(changed)
     }
 
-    private func appendContinuous(_ point: CGPoint) throws {
+    private func appendContinuous(_ point: CGPoint, pressure: CGFloat) throws {
+        let (settled, tail) = advanceContinuous(point, pressure: pressure)
+        try renderContinuous(settled: settled, tail: tail)
+    }
+
+    /// Takes in a sample: the curve pieces it settles, and the provisional straight tail to it.
+    private func advanceContinuous(_ point: CGPoint, pressure: CGFloat) -> (settled: [BrushSegment], tail: [BrushSegment]) {
         samples.append(point)
-        if samples.count > 4 { samples.removeFirst() }
+        pressures.append(pressure)
+        if samples.count > 4 { samples.removeFirst(); pressures.removeFirst() }
         let n = samples.count
-        var settled: [SIMD4<Float>] = []
-        if n == 1 { settled = [segment(point, point)] }
+        var settled: [BrushSegment] = []
+        if n == 1 { settled = [segment(point, point, pressure, pressure)] }
         else if n >= 3 {
             settled = continuousCurve(from: samples[n - 3], to: samples[n - 2],
-                before: samples[max(0, n - 4)], after: point)
+                before: samples[max(0, n - 4)], after: point, pressures: (pressures[n - 3], pressures[n - 2]))
         }
-        let tail = n >= 2 ? [segment(samples[n - 2], point)] : []
-        try renderContinuous(settled: settled, tail: tail)
+        let tail = n >= 2 ? [segment(samples[n - 2], point, pressures[n - 2], pressure)] : []
+        return (settled, tail)
+    }
+
+    /// Paints `inputs` as `append` would one at a time, but on the GPU in a few batches rather than a render and a
+    /// publish for each point, so painting a stroke again from its start doesn't stall the one in progress. Batches
+    /// stay small enough that no single render keeps the GPU busy for long.
+    func replay(_ inputs: [(point: CGPoint, pressure: CGFloat)]) throws {
+        guard gpu != nil else {
+            for input in inputs { try append(input.point, pressure: input.pressure) }
+            return
+        }
+        var pending: [BrushSegment] = [], tail: [BrushSegment] = []
+        for input in inputs {
+            let point = input.point
+            guard point.x.isFinite, point.y.isFinite, abs(point.x) <= 10_000_000, abs(point.y) <= 10_000_000,
+                  samples.last != point else { continue }
+            let pressure = input.pressure.isFinite ? min(1, max(0, input.pressure)) : 1
+            let advanced = advanceContinuous(point, pressure: pressure)
+            pending += advanced.settled
+            tail = advanced.tail
+            if pending.count >= 32 {
+                try renderContinuous(settled: pending, tail: [])
+                pending = []
+            }
+        }
+        try renderContinuous(settled: pending, tail: tail)
+    }
+
+    /// Whether a dab at `point` (document pixels) reaches past the layer's own pixels.
+    func reachesPastSource(at point: CGPoint) -> Bool {
+        let scale = max(1e-9, min(hypot(pixelToDocument.a, pixelToDocument.b), hypot(pixelToDocument.c, pixelToDocument.d)))
+        let radius = settings.diameter / 2 / scale
+        return !sourceRect.insetBy(dx: radius, dy: radius).contains(point.applying(pixelToDocument.inverted()))
     }
 
     private func flushContinuous() throws {
         let n = samples.count
         guard n >= 2 else { return }
         let settled = continuousCurve(from: samples[n - 2], to: samples[n - 1],
-            before: samples[max(0, n - 3)], after: samples[n - 1])
+            before: samples[max(0, n - 3)], after: samples[n - 1], pressures: (pressures[n - 2], pressures[n - 1]))
         try renderContinuous(settled: settled, tail: [])
         samples = [samples[n - 1]]
+        pressures = [pressures[n - 1]]
     }
 
-    private func segment(_ a: CGPoint, _ b: CGPoint) -> SIMD4<Float> {
-        SIMD4(Float(a.x), Float(a.y), Float(b.x), Float(b.y))
+    private func segment(_ a: CGPoint, _ b: CGPoint, _ pressureA: CGFloat, _ pressureB: CGFloat) -> BrushSegment {
+        let radius = settings.diameter / 2
+        let start = settings.dynamics(pressureA), end = settings.dynamics(pressureB)
+        return BrushSegment(line: SIMD4(Float(a.x), Float(a.y), Float(b.x), Float(b.y)),
+                            dynamics: SIMD4(Float(radius * start.scale), Float(radius * end.scale),
+                                            Float(start.strength), Float(end.strength)))
     }
 
     /// Adaptive chord subdivision keeps the centerline within 0.2 document pixels
     /// of the spline. Straight movement requires just one segment even at 4K.
-    private func continuousCurve(from start: CGPoint, to end: CGPoint, before: CGPoint, after: CGPoint) -> [SIMD4<Float>] {
+    private func continuousCurve(from start: CGPoint, to end: CGPoint, before: CGPoint, after: CGPoint,
+                                 pressures: (CGFloat, CGFloat)) -> [BrushSegment] {
+        func pressure(_ u: CGFloat) -> CGFloat { pressures.0 + (pressures.1 - pressures.0) * u }
         func knot(_ t: CGFloat, _ a: CGPoint, _ b: CGPoint) -> CGFloat { t + max(0.0001, sqrt(hypot(b.x - a.x, b.y - a.y))) }
         func mix(_ a: CGPoint, _ b: CGPoint, _ ta: CGFloat, _ tb: CGFloat, _ t: CGFloat) -> CGPoint {
             let wa = (tb - t) / (tb - ta), wb = (t - ta) / (tb - ta)
@@ -352,7 +436,7 @@ final class BrushStroke {
             let a = mix(before, start, t0, t1, t), b = mix(start, end, t1, t2, t), c = mix(end, after, t2, t3, t)
             return mix(mix(a, b, t0, t2, t), mix(b, c, t1, t3, t), t1, t2, t)
         }
-        var result: [SIMD4<Float>] = []
+        var result: [BrushSegment] = []
         func subdivide(_ a: CGPoint, _ b: CGPoint, _ lo: CGFloat, _ hi: CGFloat, _ depth: Int) {
             let dx = b.x - a.x, dy = b.y - a.y, lengthSquared = dx * dx + dy * dy
             func error(_ p: CGPoint) -> CGFloat {
@@ -361,7 +445,7 @@ final class BrushStroke {
             }
             let mid = (lo + hi) / 2, m = point(mid)
             let deviation = max(error(m), error(point((lo + mid) / 2)), error(point((mid + hi) / 2)))
-            if deviation <= 0.2 || depth >= 10 { result.append(segment(a, b)); return }
+            if deviation <= 0.2 || depth >= 10 { result.append(segment(a, b, pressure(lo), pressure(hi))); return }
             subdivide(a, m, lo, mid, depth + 1)
             subdivide(m, b, mid, hi, depth + 1)
         }
@@ -369,12 +453,12 @@ final class BrushStroke {
         return result
     }
 
-    private func continuousKeys(_ segments: [SIMD4<Float>]) -> Set<Int> {
+    private func continuousKeys(_ segments: [BrushSegment]) -> Set<Int> {
         var keys = Set<Int>()
         let reach = settings.diameter / 2 + 2
         let inverse = pixelToDocument.inverted()
         let columns = (width + Self.tileSize - 1) / Self.tileSize
-        for s in segments {
+        for s in segments.map(\.line) {
             let box = CGRect(x: CGFloat(min(s.x, s.z)), y: CGFloat(min(s.y, s.w)),
                 width: CGFloat(abs(s.z - s.x)), height: CGFloat(abs(s.w - s.y)))
                 .insetBy(dx: -reach, dy: -reach).intersection(canvas)
@@ -390,7 +474,7 @@ final class BrushStroke {
         return keys
     }
 
-    private func renderContinuous(settled: [SIMD4<Float>], tail: [SIMD4<Float>]) throws {
+    private func renderContinuous(settled: [BrushSegment], tail: [BrushSegment]) throws {
         guard let gpu else { return }
         let tailKeys = continuousKeys(tail)
         let changed = continuousKeys(settled).union(tailKeys).union(gpuTailKeys)
@@ -401,7 +485,8 @@ final class BrushStroke {
             guard let tile = tiles[key] else { continue }
             if coverage[key] == nil {
                 coverage[key] = try BrushRaster.context(width: Int(tile.rect.width), height: Int(tile.rect.height), mask: true)
-                gpuTiles[key] = try gpu.tile(width: Int(tile.rect.width), height: Int(tile.rect.height))
+                gpuTiles[key] = try gpu.tile(width: Int(tile.rect.width), height: Int(tile.rect.height),
+                                             capped: settings.pressureOpacity && settings.hardness < 1)
             }
             work.append((gpuTiles[key]!, tile.rect, coverage[key]!))
         }
@@ -412,7 +497,7 @@ final class BrushStroke {
 
     /// Draws a straight tail to the cursor, first saving the coverage it can touch and the
     /// dab spacing state, so `removeTail()` can put both back exactly.
-    private func drawTail(from start: CGPoint, to end: CGPoint, changed: inout Set<Int>) throws {
+    private func drawTail(from start: CGPoint, to end: CGPoint, pressure: CGFloat, changed: inout Set<Int>) throws {
         let reach = settings.diameter / 2 + 2
         let box = CGRect(x: min(start.x, end.x), y: min(start.y, end.y), width: abs(end.x - start.x), height: abs(end.y - start.y))
             .insetBy(dx: -reach, dy: -reach).intersection(canvas)
@@ -428,9 +513,9 @@ final class BrushStroke {
                 }
             }
         }
-        let saved = (previous, distanceToNext)
-        try walk(to: end, changed: &changed)
-        (previous, distanceToNext) = saved
+        let saved = (previous, distanceToNext, previousPressure)
+        try walk(to: end, pressure: pressure, changed: &changed)
+        (previous, distanceToNext, previousPressure) = saved
     }
 
     private func removeTail() -> Set<Int> {
@@ -449,7 +534,8 @@ final class BrushStroke {
 
     /// Centripetal Catmull–Rom between `start` and `end`: it passes through every sample
     /// without the loops or overshoot uniform splines make at uneven mouse speeds.
-    private func curve(from start: CGPoint, to end: CGPoint, before: CGPoint, after: CGPoint, changed: inout Set<Int>) throws {
+    private func curve(from start: CGPoint, to end: CGPoint, before: CGPoint, after: CGPoint,
+                       pressures: (CGFloat, CGFloat), changed: inout Set<Int>) throws {
         func knot(_ t: CGFloat, _ a: CGPoint, _ b: CGPoint) -> CGFloat { t + max(0.0001, sqrt(hypot(b.x - a.x, b.y - a.y))) }
         func mix(_ a: CGPoint, _ b: CGPoint, _ ta: CGFloat, _ tb: CGFloat, _ t: CGFloat) -> CGPoint {
             let wa = (tb - t) / (tb - ta), wb = (t - ta) / (tb - ta)
@@ -461,7 +547,8 @@ final class BrushStroke {
             let t = t1 + (t2 - t1) * CGFloat(index) / CGFloat(pieces)
             let a1 = mix(before, start, t0, t1, t), a2 = mix(start, end, t1, t2, t), a3 = mix(end, after, t2, t3, t)
             let b1 = mix(a1, a2, t0, t2, t), b2 = mix(a2, a3, t1, t3, t)
-            try walk(to: index == pieces ? end : mix(b1, b2, t1, t2, t), changed: &changed)
+            let pressure = pressures.0 + (pressures.1 - pressures.0) * CGFloat(index) / CGFloat(pieces)
+            try walk(to: index == pieces ? end : mix(b1, b2, t1, t2, t), pressure: pressure, changed: &changed)
         }
     }
 
@@ -470,7 +557,7 @@ final class BrushStroke {
     static func spacingFraction(_ hardness: CGFloat) -> CGFloat { hardness >= 1 ? 0.015 : 0.025 }
 
     /// Lays evenly spaced dabs along a straight run from the previous dab position.
-    private func walk(to point: CGPoint, changed: inout Set<Int>) throws {
+    private func walk(to point: CGPoint, pressure: CGFloat = 1, changed: inout Set<Int>) throws {
         let spacing = max(0.25, settings.diameter * Self.spacingFraction(settings.hardness))
         if let previous {
             let dx = point.x - previous.x, dy = point.y - previous.y
@@ -478,16 +565,19 @@ final class BrushStroke {
             if length > 0 {
                 var distance = distanceToNext
                 while distance <= length {
-                    try dab(CGPoint(x: previous.x + dx * distance / length, y: previous.y + dy * distance / length), changed: &changed)
+                    let along = distance / length
+                    try dab(CGPoint(x: previous.x + dx * along, y: previous.y + dy * along),
+                            pressure: previousPressure + (pressure - previousPressure) * along, changed: &changed)
                     distance += spacing
                 }
                 distanceToNext = distance - length
             }
         } else {
-            try dab(point, changed: &changed)
+            try dab(point, pressure: pressure, changed: &changed)
             distanceToNext = spacing
         }
         previous = point
+        previousPressure = pressure
     }
 
     private func publish(_ changed: Set<Int>) throws {
@@ -592,8 +682,12 @@ final class BrushStroke {
     private static let eraseColor = CGColor(srgbRed: 0, green: 0, blue: 0, alpha: 1)
     private static let healingWash = CGColor(srgbRed: 0.12, green: 0.12, blue: 0.12, alpha: 1)
 
-    private func dab(_ point: CGPoint, changed: inout Set<Int>) throws {
-        let radius = settings.diameter / 2
+    private func dab(_ point: CGPoint, pressure: CGFloat = 1, changed: inout Set<Int>) throws {
+        let dynamics = settings.dynamics(pressure)
+        guard dynamics.strength > 0 else { return }
+        // A dab smaller or fainter than the full tip is drawn rather than blitted from the full-size one.
+        let full = dynamics.scale == 1 && dynamics.strength == 1
+        let radius = settings.diameter / 2 * dynamics.scale
         let circle = CGRect(x: point.x - radius, y: point.y - radius, width: radius * 2, height: radius * 2)
         let clipped = circle.intersection(canvas)
         guard !clipped.isNull, !clipped.isEmpty else { return }
@@ -602,7 +696,7 @@ final class BrushStroke {
         // Snapped to whole pixels so the tip lands 1:1 with nothing to resample. The tip is
         // radially symmetric, so the layer's flip is harmless, and half a pixel of placement
         // sits far below what a dab's soft rim resolves.
-        let blit: CGRect? = gridTip.map { tip in
+        let blit: CGRect? = (full ? gridTip : nil).map { tip in
             let center = point.applying(inverse)
             return CGRect(x: (center.x - CGFloat(tip.width) / 2).rounded(),
                           y: (center.y - CGFloat(tip.height) / 2).rounded(),
@@ -628,7 +722,7 @@ final class BrushStroke {
                 }
                 guard let context = coverage[key] else { continue }
                 context.saveGState()
-                if let gridTip, let blit {
+                if full, let gridTip, let blit {
                     context.clip(to: pixelCanvas.offsetBy(dx: -tile.rect.minX, dy: -tile.rect.minY))
                     context.setBlendMode(settings.hardness >= 1 ? .lighten : .screen)
                     context.interpolationQuality = .none
@@ -640,8 +734,14 @@ final class BrushStroke {
                 context.translateBy(x: -tile.rect.minX, y: -tile.rect.minY)
                 context.concatenate(inverse)
                 context.clip(to: canvas)
+                context.setShouldAntialias(settings.antialiased)
                 context.setBlendMode(settings.hardness >= 1 ? .lighten : .screen)
-                if let stamp {
+                if settings.hardness >= 1, dynamics.strength < 1 {
+                    // Lighten with a gray as strong as the press: the stroke builds to the firmest press, never past it.
+                    context.setFillColor(gray: dynamics.strength, alpha: 1)
+                    context.fillEllipse(in: circle)
+                } else if let stamp {
+                    context.setAlpha(dynamics.strength)
                     // Stamp the pre-rendered tip: drawing the falloff procedurally for every
                     // dab (a 60 px brush lays ~14 per mouse move) is what made strokes stutter.
                     context.interpolationQuality = .low
@@ -650,6 +750,7 @@ final class BrushStroke {
                     context.setFillColor(gray: 1, alpha: 1)
                     context.fillEllipse(in: circle)
                 } else if let falloff {
+                    context.setAlpha(dynamics.strength)
                     context.drawRadialGradient(falloff, startCenter: point, startRadius: radius * settings.hardness,
                         endCenter: point, endRadius: radius, options: [.drawsBeforeStartLocation])
                 }
@@ -664,6 +765,7 @@ final class BrushStroke {
         let size = Self.tileSize
         let rect = CGRect(x: x * size, y: y * size, width: min(size, width - x * size), height: min(size, height - y * size))
         let nextBounds = allocatedBounds.map { $0.union(rect) } ?? (source == nil ? rect : sourceRect.union(rect))
+        if let growthLimit, nextBounds.width * nextBounds.height > CGFloat(growthLimit) { throw OutgrewItsResolution() }
         guard nextBounds.width <= DocumentLimits.maxSideExtent, nextBounds.height <= DocumentLimits.maxSideExtent,
               nextBounds.width * nextBounds.height <= CGFloat(pixelLimit) else { throw ProjectError.tooLarge }
         allocatedBounds = nextBounds
